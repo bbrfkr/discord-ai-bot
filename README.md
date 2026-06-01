@@ -22,6 +22,7 @@ Discord ──(メッセージ)──▶ bot ──HTTP(OPENCODE_BASE_URL)──
 - **会話の継続**: 1 Discord スレッド = 1 opencode セッション。対応表（`thread_id ↔ session_id`）を `.data/thread-sessions.json` に永続化するため、再起動後も会話が続く。
 - **画像の添付**: メッセージに添付された画像（本文なしの画像のみの投稿も可）をダウンロードし、base64 data URL に変換して opencode へ渡す。モデル側で画像入力が有効である必要がある。
 - **対話ゲート（permission / question）の橋渡し**: opencode は `bash` 実行やファイル編集の許可待ち（permission）や、ユーザへの選択式/自由入力の質問（question）に当たると、応答を返さずブロックする。bot はイベントストリーム（SSE）でこれらを受け取り、対応スレッドへ通知して返信で応答させる。詳細は[対話（許可・質問）への応答](#対話許可質問への応答)を参照。
+- **作業中の進捗反映**: opencode の応答は完了まで何も返らないため、長い作業中はスレッドが「入力中…」のまま無音になる。bot はイベントストリーム（SSE）でツール実行（`bash`/`edit`/`read` など）と TODO 進捗を受け取り、ステップごとにスレッドへ逐次投稿して「今なにをしているか」を可視化する。詳細は[作業中の進捗反映](#作業中の進捗反映)を参照。
 
 ### コンポーネント対応表
 
@@ -31,6 +32,7 @@ Discord ──(メッセージ)──▶ bot ──HTTP(OPENCODE_BASE_URL)──
 | `ThreadSessionStore` | `thread_id ↔ session_id` を JSON で永続化 | `src/store/threadSessionStore.ts` |
 | `ThreadAgent` | 上記2つを束ね「スレッド単位の会話」を提供 | `src/threadAgent.ts` |
 | `InteractionGate` | 対話要求（許可/質問, SSE）を購読しスレッドへ通知・返信で応答 | `src/discord/interactionGate.ts` |
+| `ProgressReporter` | 作業中のツール実行・TODO 進捗（SSE）を購読しスレッドへ逐次投稿 | `src/discord/progressReporter.ts` |
 | Discord bot | チャンネル監視・スレッド応答 | `src/discord/bot.ts`, `src/discord/format.ts` |
 | 動作確認 CLI | opencode 単体の疎通テスト | `src/cli.ts` |
 
@@ -72,6 +74,29 @@ bot はこれを次のように橋渡しする（実装: `src/discord/interactio
 - **取り消し**: `拒否` / `キャンセル` / `reject` で質問への回答を取り消す。
 
 > 💡 そもそも許可を求める頻度を減らしたい場合は、**opencode-server 側**の `opencode.json` の `permission` 設定で、安全な操作を `allow`、危険な操作だけ `ask`/`deny` に振り分けるとよい（設定キー: `edit` / `bash` / `webfetch` / `question` など。`bash` はコマンドのパターン別指定も可能）。
+
+---
+
+## 作業中の進捗反映
+
+opencode の応答（`session.prompt`）は**完了するまで何も返さない**ため、時間のかかる作業中はスレッドが「入力中…」のまま無音になり、ユーザに何が起きているか見えない。`ProgressReporter`（`src/discord/progressReporter.ts`）が `InteractionGate` とは別の SSE 接続でイベントストリームを購読し、作業の進行をステップごとにスレッドへ投稿する。
+
+反映するイベントは次の2種類:
+
+- **ツール実行**（`message.part.updated` の `tool` パート）: ツールが実行に入った（`running`）タイミングで「今なにをしているか」を1行投稿する。例:
+  - `🔧 コマンドを実行中: \`npm test\``（bash）
+  - `📖 読み込み中: \`src/app.ts\``（read）／ `✏️ 編集中: …`（edit）／ `📝 作成中: …`（write）
+  - `🔍 検索中: …`（grep/glob）／ `🌐 取得中: …`（webfetch）／ `🤖 サブタスク実行中: …`（task）
+- **TODO 進捗**（`todo.updated`）: agent の TODO リストが変化したとき `📋 進捗 2/5 完了 — 🔄 着手中の項目` の形で投稿する。
+
+実装上の注意:
+
+- 同一ツール（`callID`）は状態遷移（`pending`→`running`→`completed`）のたびに送られてくるが、**1回だけ**投稿する。
+- TODO は完了数や着手中の項目が変化したときだけ投稿し、同内容の連投を防ぐ。
+- セッションが `session.idle` に戻ると、そのセッションぶんの通知状態（既知の `callID`・直近 TODO）を破棄する。
+- スレッドに紐づかないセッション（CLI 等）は通知先が無いので無視する。
+
+> 💡 投稿が多すぎる場合は `describeTool`（`progressReporter.ts`）で対象ツールを絞り込める。逆に表示を最小限にしたいなら、ツール実行の投稿を止めて TODO 進捗だけ残すといった調整も同ファイルで完結する。
 
 ---
 

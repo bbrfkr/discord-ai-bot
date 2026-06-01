@@ -15,6 +15,7 @@ import {
 import { ThreadAgent, type AttachmentInput } from "../threadAgent.js";
 import { deriveThreadName, splitForDiscord } from "./format.js";
 import { InteractionGate } from "./interactionGate.js";
+import { ProgressReporter } from "./progressReporter.js";
 
 const token = requireEnv("DISCORD_TOKEN");
 const targetChannelId = requireEnv("DISCORD_TARGET_CHANNEL_ID");
@@ -22,6 +23,8 @@ const targetChannelId = requireEnv("DISCORD_TARGET_CHANNEL_ID");
 const threadAgent = new ThreadAgent();
 // opencode の対話ゲート（許可/質問）を Discord の返信へ橋渡しする（ask のブロック解除）。
 const interactionGate = new InteractionGate(threadAgent);
+// 作業中のツール実行・TODO 進捗をスレッドへ逐次反映する（無音の入力中状態を解消）。
+const progressReporter = new ProgressReporter(threadAgent);
 
 const client = new Client({
   intents: [
@@ -38,6 +41,9 @@ client.once(Events.ClientReady, (c) => {
   // 対話要求（許可/質問）の購読を開始（client 経由で通知先スレッドを取得する）。
   interactionGate.start(c);
   console.log("[discord] interaction gate started");
+  // 進捗（ツール実行/TODO）の購読を開始。
+  progressReporter.start(c);
+  console.log("[discord] progress reporter started");
 });
 
 client.on(Events.MessageCreate, async (message) => {
