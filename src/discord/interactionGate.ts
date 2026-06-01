@@ -52,14 +52,6 @@ export class InteractionGate {
     this.agent = agent;
   }
 
-  /**
-   * 要求の購読を開始する（バックグラウンドで回り続ける）。
-   * ストリームが切れても一定間隔で再購読する。discord client は通知先スレッドの取得に使う。
-   */
-  start(discord: Client): void {
-    void this.loop(discord);
-  }
-
   /** このスレッドに保留中の対話があるか。 */
   hasPending(threadId: string): boolean {
     return this.pending.has(threadId);
@@ -145,27 +137,13 @@ export class InteractionGate {
     return { handled: true, message: `✅ 回答を送信しました（${flat}）。処理を続けます…` };
   }
 
-  // ── 購読ループ ───────────────────────────────────────────────
+  // ── イベント処理 ─────────────────────────────────────────────
 
-  /** 1 接続ぶんの購読 + 自動再接続のループ。 */
-  private async loop(discord: Client): Promise<void> {
-    for (;;) {
-      try {
-        for await (const ev of this.agent.events()) {
-          await this.onEvent(discord, ev).catch((err) =>
-            console.error("[interaction] handle event failed:", err),
-          );
-        }
-      } catch (err) {
-        console.error("[interaction] event stream error:", err);
-      }
-      // ストリームが終了/切断したら少し待って再購読する。
-      await delay(3000);
-    }
-  }
-
-  /** イベントを種別ごとに捌く。 */
-  private async onEvent(discord: Client, ev: OpencodeEvent): Promise<void> {
+  /**
+   * イベントを種別ごとに捌く。購読ループは bot 側の単一ディスパッチャが持ち、
+   * 受け取った各イベントをこのメソッドへ渡す（SSE 接続を許可/質問・進捗で共有するため）。
+   */
+  async handleEvent(discord: Client, ev: OpencodeEvent): Promise<void> {
     if (ev.type === "permission.asked") {
       await this.onPermission(discord, ev.properties as unknown as PermissionRequest);
       return;
@@ -376,8 +354,4 @@ function expiredMessage(): string {
     "⚠️ 応答の送信に失敗しました（要求が失効した可能性があります）。" +
     "必要ならもう一度指示し直してください。"
   );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
