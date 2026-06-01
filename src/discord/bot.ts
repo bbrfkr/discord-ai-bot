@@ -38,13 +38,43 @@ const client = new Client({
 client.once(Events.ClientReady, (c) => {
   console.log(`[discord] logged in as ${c.user.tag}`);
   console.log(`[discord] watching channel: ${targetChannelId}`);
-  // 対話要求（許可/質問）の購読を開始（client 経由で通知先スレッドを取得する）。
-  interactionGate.start(c);
-  console.log("[discord] interaction gate started");
-  // 進捗（ツール実行/TODO）の購読を開始。
-  progressReporter.start(c);
-  console.log("[discord] progress reporter started");
+  // SSE 購読は 1 本に統合し、各イベントを許可/質問ゲートと進捗レポーターの両方へ配る。
+  // （opencode サーバが SSE を 1 接続にしか流さない/取り合う場合に、購読を 2 本張ると
+  //   片方にしかイベントが届かないため。）
+  void consumeEvents(c);
+  console.log("[discord] event dispatcher started (interaction + progress)");
 });
+
+/** 単一の SSE 購読ループ。受け取った各イベントを両ハンドラへ配り、切断時は再購読する。 */
+async function consumeEvents(c: Client): Promise<void> {
+  const debug = process.env.PROGRESS_DEBUG === "1";
+  const seenTypes = new Set<string>();
+  for (;;) {
+    try {
+      for await (const ev of threadAgent.events()) {
+        // 実体のイベント型名を確認するための診断ログ（型ごとに初回だけ）。
+        if (!seenTypes.has(ev.type)) {
+          seenTypes.add(ev.type);
+          if (debug) console.log(`[events] first seen: ${ev.type}`);
+        }
+        await interactionGate
+          .handleEvent(c, ev)
+          .catch((err) =>
+            console.error("[interaction] handle event failed:", err),
+          );
+        await progressReporter
+          .handleEvent(c, ev)
+          .catch((err) =>
+            console.error("[progress] handle event failed:", err),
+          );
+      }
+    } catch (err) {
+      console.error("[events] stream error:", err);
+    }
+    // ストリームが終了/切断したら少し待って再購読する。
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+}
 
 client.on(Events.MessageCreate, async (message) => {
   // 自分や他 bot の発言は無視（無限ループ防止）。

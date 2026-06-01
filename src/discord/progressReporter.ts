@@ -21,34 +21,20 @@ export class ProgressReporter {
     this.agent = agent;
   }
 
-  /** 購読を開始する（バックグラウンドで回り続け、切断時は再購読する）。 */
-  start(discord: Client): void {
-    void this.loop(discord);
-  }
+  // ── イベント処理 ─────────────────────────────────────────────
 
-  // ── 購読ループ ───────────────────────────────────────────────
-
-  private async loop(discord: Client): Promise<void> {
-    for (;;) {
-      try {
-        for await (const ev of this.agent.events()) {
-          await this.onEvent(discord, ev).catch((err) =>
-            console.error("[progress] handle event failed:", err),
-          );
-        }
-      } catch (err) {
-        console.error("[progress] event stream error:", err);
-      }
-      await delay(3000);
-    }
-  }
-
-  private async onEvent(discord: Client, ev: OpencodeEvent): Promise<void> {
-    if (ev.type === "message.part.updated") {
+  /**
+   * イベントを種別ごとに捌く。購読ループは bot 側の単一ディスパッチャが持ち、
+   * 受け取った各イベントをこのメソッドへ渡す（SSE 接続を許可/質問・進捗で共有するため）。
+   */
+  async handleEvent(discord: Client, ev: OpencodeEvent): Promise<void> {
+    // 進捗系イベントの型名は SDK 生成型と実体がズレている可能性があるため、
+    // メッセージパート更新・TODO 更新は名前ゆらぎを吸収して拾う。
+    if (isPartUpdated(ev.type)) {
       await this.onPart(discord, ev.properties as PartUpdatedProps);
       return;
     }
-    if (ev.type === "todo.updated") {
+    if (isTodoUpdated(ev.type)) {
       await this.onTodo(discord, ev.properties as TodoUpdatedProps);
       return;
     }
@@ -68,15 +54,23 @@ export class ProgressReporter {
     discord: Client,
     props: PartUpdatedProps,
   ): Promise<void> {
-    const part = props?.part;
+    // 実体は SDK 生成型とズレうるため、part は properties.part でも properties 直下でも拾う。
+    const part = (props?.part ?? props) as
+      | ({ type?: string } & Partial<ToolPart>)
+      | undefined;
+    if (DEBUG) {
+      console.log(
+        `[progress] part: type=${part?.type} tool=${part?.tool} status=${part?.state?.status}`,
+      );
+    }
     if (!part || part.type !== "tool") return;
     const status = part.state?.status;
     // 「今なにをしているか」を示すのが目的なので running を基本に拾う。
     // running を取りこぼした高速ツールのために completed も初回だけ拾う。
     if (status !== "running" && status !== "completed") return;
 
-    const sessionID = part.sessionID;
-    const callID = part.callID || part.id;
+    const sessionID = part.sessionID ?? part.sessionId;
+    const callID = part.callID ?? part.id;
     if (!sessionID || !callID) return;
 
     // 同一ツールは一度だけ通知する（pending→running→completed の各更新で再投稿しない）。
@@ -100,7 +94,7 @@ export class ProgressReporter {
     discord: Client,
     props: TodoUpdatedProps,
   ): Promise<void> {
-    const sessionID = props?.sessionID;
+    const sessionID = props?.sessionID ?? props?.sessionId;
     const todos = props?.todos;
     if (!sessionID || !Array.isArray(todos) || todos.length === 0) return;
 
@@ -127,12 +121,27 @@ export class ProgressReporter {
   }
 }
 
+/** 進捗ログを有効化する（PROGRESS_DEBUG=1）。実体のイベント形状を確認する用。 */
+const DEBUG = process.env.PROGRESS_DEBUG === "1";
+
+/** message.part.updated 相当のイベント型名か（SDK と実体のゆらぎを吸収）。 */
+function isPartUpdated(type: string): boolean {
+  return type === "message.part.updated" || type === "message.part.created";
+}
+
+/** todo.updated 相当のイベント型名か。 */
+function isTodoUpdated(type: string): boolean {
+  return type === "todo.updated";
+}
+
 // ── イベント payload の最小形（SDK 生成型に頼らず実体に寄せて緩く扱う） ─────
 
 interface ToolPart {
   type: "tool";
   id: string;
   sessionID: string;
+  /** 実体が camelCase の場合のフォールバック。 */
+  sessionId?: string;
   callID?: string;
   tool: string;
   state?: {
@@ -153,6 +162,7 @@ interface TodoItem {
 
 interface TodoUpdatedProps {
   sessionID?: string;
+  sessionId?: string;
   todos?: TodoItem[];
 }
 
@@ -223,8 +233,4 @@ function code(v: string | undefined): string | undefined {
   const oneLine = v.replace(/\s+/g, " ").trim();
   const clipped = oneLine.length > 180 ? `${oneLine.slice(0, 177)}…` : oneLine;
   return `\`${clipped}\``;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -47,7 +47,7 @@ opencode には、実行を止めてユーザの入力を待つ**対話ゲート
 
 bot はこれを次のように橋渡しする（実装: `src/discord/interactionGate.ts`）。
 
-1. 起動時にイベントストリーム（`GET /event`、SSE）を購読する。
+1. 起動時にイベントストリーム（`GET /event`、SSE）を購読する。購読は bot 側（`bot.ts`）の**単一ディスパッチャ**が 1 本だけ張り、受け取った各イベントを許可/質問ゲートと進捗レポーターの両方へ配る（opencode サーバが SSE を 1 接続にしか流さない/取り合う場合に、購読を複数張ると一部のハンドラへイベントが届かないため）。
 2. `permission.asked` / `question.asked` を受け取ると、`sessionID` から対応スレッドを逆引きし、そのスレッドへ内容を投稿する。
 3. ユーザがそのスレッドに**返信**すると、応答に変換してサーバへ返し（`POST /session/{id}/permissions/{permissionID}` または `POST /question/{id}/reply`）、ブロックを解除する。解除後は元の応答がそのままスレッドへ投稿される。
 
@@ -79,7 +79,7 @@ bot はこれを次のように橋渡しする（実装: `src/discord/interactio
 
 ## 作業中の進捗反映
 
-opencode の応答（`session.prompt`）は**完了するまで何も返さない**ため、時間のかかる作業中はスレッドが「入力中…」のまま無音になり、ユーザに何が起きているか見えない。`ProgressReporter`（`src/discord/progressReporter.ts`）が `InteractionGate` とは別の SSE 接続でイベントストリームを購読し、作業の進行をステップごとにスレッドへ投稿する。
+opencode の応答（`session.prompt`）は**完了するまで何も返さない**ため、時間のかかる作業中はスレッドが「入力中…」のまま無音になり、ユーザに何が起きているか見えない。`ProgressReporter`（`src/discord/progressReporter.ts`）が（許可/質問ゲートと共有する単一 SSE 購読から配られる）イベントを受け取り、作業の進行をステップごとにスレッドへ投稿する。
 
 反映するイベントは次の2種類:
 
@@ -97,6 +97,8 @@ opencode の応答（`session.prompt`）は**完了するまで何も返さな�
 - スレッドに紐づかないセッション（CLI 等）は通知先が無いので無視する。
 
 > 💡 投稿が多すぎる場合は `describeTool`（`progressReporter.ts`）で対象ツールを絞り込める。逆に表示を最小限にしたいなら、ツール実行の投稿を止めて TODO 進捗だけ残すといった調整も同ファイルで完結する。
+
+> 🔍 進捗が出ないときは、環境変数 `PROGRESS_DEBUG=1` を付けて起動すると、実際に流れてきたイベント型名（型ごとに初回 1 回）と、`tool` パートの `type` / `tool` / `status` をログ出力する。これで opencode サーバ側のイベント型名・payload が想定とズレていないか確認できる。
 
 ---
 
