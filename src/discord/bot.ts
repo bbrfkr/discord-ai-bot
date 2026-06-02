@@ -6,6 +6,7 @@ try {
 }
 
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
@@ -13,7 +14,12 @@ import {
   type SendableChannels,
 } from "discord.js";
 import { ThreadAgent, type AttachmentInput } from "../threadAgent.js";
-import { deriveThreadName, splitForDiscord } from "./format.js";
+import {
+  deriveThreadName,
+  extractAttachments,
+  splitForDiscord,
+  type ExtractedAttachment,
+} from "./format.js";
 import { InteractionGate } from "./interactionGate.js";
 import { ProgressReporter } from "./progressReporter.js";
 
@@ -143,19 +149,57 @@ async function respond(
   const typing = startTyping(channel);
   try {
     const answer = await threadAgent.ask(threadId, text, attachments);
-    const chunks = splitForDiscord(answer);
-    if (chunks.length === 0) {
+    // AI 応答内の ComfyUI URL 等は Discord 添付に差し替える（残りは本文として送る）。
+    const { text: body, attachments: outFiles } = extractAttachments(answer);
+    const chunks = splitForDiscord(body);
+
+    if (chunks.length === 0 && outFiles.length === 0) {
       await channel.send("（応答が空でした）");
       return;
     }
-    for (const chunk of chunks) {
-      await channel.send(chunk);
+
+    // 本文チャンクを送る。最後のチャンクに添付をまとめる（本文が無ければ添付だけ送る）。
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      const isLast = i === chunks.length - 1;
+      if (isLast && outFiles.length > 0) {
+        await sendWithFiles(channel, chunk, outFiles);
+      } else {
+        await channel.send(chunk);
+      }
+    }
+    if (chunks.length === 0 && outFiles.length > 0) {
+      await sendWithFiles(channel, "", outFiles);
     }
   } catch (err) {
     console.error("[discord] agent error:", err);
     await channel.send("⚠️ AI への問い合わせに失敗しました。");
   } finally {
     typing.stop();
+  }
+}
+
+/**
+ * 本文＋添付（URL）を1メッセージで送る。discord.js は files の URL 文字列を
+ * 内部で fetch して Discord CDN にアップロードする（恒久保存される）。
+ * サイズ超過・取得失敗時はリンクをテキストで貼るフォールバックに切り替える。
+ */
+async function sendWithFiles(
+  channel: SendableChannels,
+  content: string,
+  files: ExtractedAttachment[],
+): Promise<void> {
+  const built = files.map((f) => {
+    const a = new AttachmentBuilder(f.url);
+    if (f.name) a.setName(f.name);
+    return a;
+  });
+  try {
+    await channel.send({ content: content || undefined, files: built });
+  } catch (err) {
+    console.error("[discord] attach failed, falling back to links:", err);
+    const links = files.map((f) => f.url).join("\n");
+    await channel.send(content ? `${content}\n${links}` : links);
   }
 }
 
