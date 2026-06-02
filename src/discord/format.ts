@@ -68,19 +68,40 @@ export interface ExtractResult {
  * AI 応答テキストから添付対象 URL（ComfyUI の生成物など）を抽出する。
  * 抽出した URL は本文から除去し、ファイル名（filename クエリ or パス末尾）を name に詰める。
  * 同一 URL は1回だけ。マッチしない URL は本文にそのまま残す。
+ *
+ * 素の URL だけでなく、Markdown リンク `[label](URL)` や `<URL>` で包まれた形でも検出する
+ * （プレビューされない `.glb` 等のメッシュを AI が「ダウンロードリンク」として包みがちなため）。
+ * 包んでいた構文（`[label]()` や `<>` の残骸）ごと本文から取り除く。
  */
 export function extractAttachments(text: string): ExtractResult {
-  const urlRe = /https?:\/\/[^\s<>()"'\]]+/g;
   const attachments: ExtractedAttachment[] = [];
   const seen = new Set<string>();
-  const stripped = text.replace(urlRe, (raw) => {
-    // 文末の句読点等は URL から除外する。
-    const url = raw.replace(/[).,;]+$/, "");
-    if (!ATTACH_URL_PATTERN.test(url) || seen.has(url)) return raw;
-    seen.add(url);
-    attachments.push({ url, name: attachmentNameFromUrl(url) });
-    return ""; // 本文からは取り除き、添付として送る。
-  });
+  // URL を添付候補として登録する。対象パターン外なら false（本文に残す）。
+  const take = (raw: string): boolean => {
+    // 文末の句読点・閉じ括弧等は URL から除外する。
+    const url = raw.replace(/[).,;>]+$/, "");
+    if (!ATTACH_URL_PATTERN.test(url)) return false;
+    if (!seen.has(url)) {
+      seen.add(url);
+      attachments.push({ url, name: attachmentNameFromUrl(url) });
+    }
+    return true; // 本文からは取り除き、添付として送る。
+  };
+
+  let stripped = text;
+  // 1) Markdown リンク [label](URL) / [label](<URL>) を丸ごと除去（添付化できた場合のみ）。
+  stripped = stripped.replace(
+    /\[[^\]]*\]\(\s*<?(https?:\/\/[^\s)>]+)>?\s*\)/g,
+    (m, url: string) => (take(url) ? "" : m),
+  );
+  // 2) 山括弧 <URL>（埋め込み抑止記法）を丸ごと除去。
+  stripped = stripped.replace(/<(https?:\/\/[^\s>]+)>/g, (m, url: string) =>
+    take(url) ? "" : m,
+  );
+  // 3) 素の URL。
+  stripped = stripped.replace(/https?:\/\/[^\s<>()"'\]]+/g, (m) =>
+    take(m) ? "" : m,
+  );
   return { text: stripped, attachments };
 }
 

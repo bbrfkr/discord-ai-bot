@@ -179,27 +179,52 @@ async function respond(
   }
 }
 
+/** URL から AttachmentBuilder を組み立てる（ファイル名があれば設定）。 */
+function toAttachment(f: ExtractedAttachment): AttachmentBuilder {
+  const a = new AttachmentBuilder(f.url);
+  if (f.name) a.setName(f.name);
+  return a;
+}
+
 /**
- * 本文＋添付（URL）を1メッセージで送る。discord.js は files の URL 文字列を
- * 内部で fetch して Discord CDN にアップロードする（恒久保存される）。
- * サイズ超過・取得失敗時はリンクをテキストで貼るフォールバックに切り替える。
+ * 本文＋添付（URL）を送る。discord.js は files の URL 文字列を内部で fetch して
+ * Discord CDN にアップロードする（恒久保存される。`.glb` 等のメッシュも添付として上がる）。
+ *
+ * まず全件まとめて1メッセージで送り、失敗したら**1件ずつ**送り直す。こうすると、
+ * 1ファイルだけ取得失敗/サイズ超過でも、他の成果物（途中成果物の画像など）は添付として残せる。
+ * それでも添付できなかったものだけ、最後にリンクをテキストで貼る（理由はログに出す）。
  */
 async function sendWithFiles(
   channel: SendableChannels,
   content: string,
   files: ExtractedAttachment[],
 ): Promise<void> {
-  const built = files.map((f) => {
-    const a = new AttachmentBuilder(f.url);
-    if (f.name) a.setName(f.name);
-    return a;
-  });
+  // 1) まとめて添付（最も自然な見た目）。
   try {
-    await channel.send({ content: content || undefined, files: built });
+    await channel.send({
+      content: content || undefined,
+      files: files.map(toAttachment),
+    });
+    return;
   } catch (err) {
-    console.error("[discord] attach failed, falling back to links:", err);
-    const links = files.map((f) => f.url).join("\n");
-    await channel.send(content ? `${content}\n${links}` : links);
+    console.error("[discord] 一括添付に失敗。1件ずつ再試行します:", err);
+  }
+
+  // 2) フォールバック: 本文を先に送り、各ファイルを個別に添付。失敗したものだけ後でリンク化。
+  if (content) await channel.send(content).catch(() => {});
+  const failed: string[] = [];
+  for (const f of files) {
+    try {
+      await channel.send({ files: [toAttachment(f)] });
+    } catch (err) {
+      console.error(`[discord] 添付に失敗 (${f.name ?? f.url}):`, err);
+      failed.push(f.url);
+    }
+  }
+  if (failed.length > 0) {
+    await channel
+      .send(`⚠️ 添付できなかったファイル:\n${failed.join("\n")}`)
+      .catch(() => {});
   }
 }
 
