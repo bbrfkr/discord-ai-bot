@@ -129,17 +129,33 @@ export class AgentService {
     text: string,
     attachments: AttachmentInput[] = [],
   ): Promise<string> {
-    // 添付はダウンロードして base64 data URL 化する（opencode はリモート URL を受け付けない）。
+    // 添付を 2 種類に分ける:
+    //   - inline: モデル（LLM）が file part として直接受け取れる mime（既定 image/*）。
+    //     従来どおりダウンロードして base64 data URL 化し file part で渡す。
+    //   - passthrough: それ以外（model/stl 等のバイナリ）。file part にすると AI SDK が
+    //     `file part media type ... functionality not supported` で弾く（モデル非対応 mime のため、
+    //     n8n に届く前に opencode 側で失敗する）。opencode に中身を触らせず、署名付き URL を
+    //     本文に添えて agent（gdrive スキルの curl 等）が直接ダウンロード・処理できるようにする。
+    const inline = attachments.filter((a) => isModelViewableMime(a.mime));
+    const passthrough = attachments.filter((a) => !isModelViewableMime(a.mime));
+
     const fileParts = await Promise.all(
-      attachments.map(async (a) => ({
+      inline.map(async (a) => ({
         type: "file" as const,
         mime: a.mime,
         ...(a.filename ? { filename: a.filename } : {}),
         url: await toDataUrl(a.url, a.mime),
       })),
     );
+    const composedText = passthrough.length
+      ? [text.trim(), formatPassthroughNote(passthrough)]
+          .filter(Boolean)
+          .join("\n\n")
+      : text;
     const parts = [
-      ...(text.trim() ? [{ type: "text" as const, text }] : []),
+      ...(composedText.trim()
+        ? [{ type: "text" as const, text: composedText }]
+        : []),
       ...fileParts,
     ];
 
@@ -235,6 +251,39 @@ function unwrap<T>(res: { data?: T; error?: unknown }): T {
     throw new Error("opencode API returned no data");
   }
   return res.data;
+}
+
+/**
+ * モデル（LLM）が file part として直接受け取れる mime か。
+ * 既定は image/* のみ。多くのプロバイダ／@ai-sdk/openai-compatible は file part で画像しか扱えず、
+ * それ以外（model/stl・audio/* 等）は `file part media type ... functionality not supported` を投げるため、
+ * 既定では画像だけをインライン添付する。OPENCODE_INLINE_MIME_PREFIXES（カンマ区切り、
+ * 例 "image/,application/pdf"）で対象 prefix を上書きできる。
+ */
+function isModelViewableMime(mime: string): boolean {
+  const prefixes = (process.env.OPENCODE_INLINE_MIME_PREFIXES ?? "image/")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const m = mime.toLowerCase();
+  return prefixes.some((p) => m.startsWith(p));
+}
+
+/**
+ * モデルに見せない添付（バイナリ等）を、agent がダウンロード・処理できるよう
+ * 署名付き URL 付きで本文に列挙する。opencode はこれらの中身に一切触れない。
+ * URL にはクエリ（Discord の署名 ex/is/hm）が含まれるため、curl 時は必ず "" で囲むよう明記する。
+ */
+function formatPassthroughNote(items: AttachmentInput[]): string {
+  const lines = items.map((a) => {
+    const name = a.filename ?? "(no name)";
+    return `- ${name} (${a.mime}): ${a.url}`;
+  });
+  return [
+    "[添付ファイル — モデルには未添付。中身が必要なら下記 URL からダウンロードして処理してください",
+    "（URL は署名付きでクエリを含み、~24時間で失効。curl 等で取得する際は URL を必ずダブルクォートで囲むこと）]",
+    ...lines,
+  ].join("\n");
 }
 
 /** URL からファイルを取得し、base64 の data URL に変換する。 */
