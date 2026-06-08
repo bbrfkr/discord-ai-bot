@@ -20,7 +20,9 @@ Discord ──(メッセージ)──▶ bot ──HTTP(OPENCODE_BASE_URL)──
 - **bot**: `discord.js` で対象チャンネルを監視 → スレッド作成 → opencode に問い合わせ → スレッドへ応答。
 - **opencode-server**: 別デプロイ。`OPENCODE_BASE_URL` で到達する（このリポジトリの管理対象外）。
 - **会話の継続**: 1 Discord スレッド = 1 opencode セッション。対応表（`thread_id ↔ session_id`）を `.data/thread-sessions.json` に永続化するため、再起動後も会話が続く。
-- **画像の添付**: メッセージに添付された画像（本文なしの画像のみの投稿も可）をダウンロードし、base64 data URL に変換して opencode へ渡す。モデル側で画像入力が有効である必要がある。
+- **ファイルの添付**: メッセージに添付されたファイル（本文なしの添付のみの投稿も可）を mime で振り分ける。
+  - **画像など（既定 `image/*`）**: ダウンロードして base64 data URL に変換し、file part として opencode（＝モデル）へ渡す。モデル側で画像入力が有効である必要がある。インライン対象の mime prefix は `OPENCODE_INLINE_MIME_PREFIXES` で変更できる。
+  - **それ以外（`model/stl` などのバイナリ）**: file part にすると AI SDK が `file part media type ... functionality not supported` で弾くため、**モデルには渡さず**、Discord の署名付き URL を本文に添えて agent に渡す。agent が必要に応じて curl 等でダウンロードして処理する（例: gdrive スキルで Google Drive へアップロード）。URL は署名付き（クエリ含む・~24h で失効）なので、取得時は URL をダブルクォートで囲む。
 - **対話ゲート（permission / question）の橋渡し**: opencode は `bash` 実行やファイル編集の許可待ち（permission）や、ユーザへの選択式/自由入力の質問（question）に当たると、応答を返さずブロックする。bot はイベントストリーム（SSE）でこれらを受け取り、対応スレッドへ通知して返信で応答させる。詳細は[対話（許可・質問）への応答](#対話許可質問への応答)を参照。
 - **作業中の進捗反映**: opencode の応答は完了まで何も返らないため、長い作業中はスレッドが「入力中…」のまま無音になる。bot はイベントストリーム（SSE）でツール実行（`bash`/`edit`/`read` など）と TODO 進捗を受け取り、ステップごとにスレッドへ逐次投稿して「今なにをしているか」を可視化する。詳細は[作業中の進捗反映](#作業中の進捗反映)を参照。
 
@@ -127,6 +129,7 @@ cp .env.example .env
 | `DISCORD_TOKEN` | ✅ | Bot トークン（Developer Portal > Bot > Reset Token） |
 | `DISCORD_TARGET_CHANNEL_ID` | ✅ | 監視対象チャンネル ID（開発者モードON → 右クリック → IDをコピー） |
 | `OPENCODE_PROVIDER_ID` / `OPENCODE_MODEL_ID` | – | 使用モデルの上書き。未指定ならサーバの既定 |
+| `OPENCODE_INLINE_MIME_PREFIXES` | – | モデルに file part として渡す添付の mime prefix（カンマ区切り）。既定 `image/`。これに一致しない添付は URL で agent に渡す（例: `image/,application/pdf`） |
 
 > litellm の接続情報やモデル定義、git/gh 認証（n8n 短命トークン）は **opencode-server 側**の設定。bot には不要。
 
